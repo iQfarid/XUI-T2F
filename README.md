@@ -27,9 +27,8 @@
 
 ## نصب سریع
 
-\`\`\`bash
+bash
 bash <(curl -Ls https://raw.githubusercontent.com/iQfarid/XUI-T2F/main/farid-t2f.sh)
-\`\`\`
 
 
 ## اجرا
