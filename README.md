@@ -24,6 +24,14 @@
 - دسترسی root
 - اتصال اینترنت (برای دانلود سورس از GitHub و در صورت نیاز نصب Go/git/gcc)
 
+
+## نصب سریع
+
+\`\`\`bash
+bash <(curl -Ls https://raw.githubusercontent.com/iQfarid/XUI-T2F/main/farid-t2f.sh)
+\`\`\`
+
+
 ## اجرا
 
 ```bash
