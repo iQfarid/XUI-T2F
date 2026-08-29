@@ -28,6 +28,8 @@ The script does **not automatically overwrite the panel database (`x-ui.db`)**. 
 
 - A Linux server
 - 3x-ui already installed
+- Better compatibility with version 2.8.11
+ 
 
 ## Quick Install
 
