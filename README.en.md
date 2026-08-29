@@ -1,4 +1,4 @@
-[🇮🇷 فارسی](README.fa.md)
+[🇮🇷 فارسی](README.md)
 
 # X-UI T2F
 
