@@ -1,4 +1,4 @@
-"🇬🇧 English" (README.md)
+[English](README.fa.md)
 
 X-UI T2F
 
