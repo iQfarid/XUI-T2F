@@ -31,8 +31,17 @@ BASE_DIR="/root/FARID-T2F"
 BACKUP_DIR="$BASE_DIR/backups"
 BASE_BACKUP_DIR="$BASE_DIR/base"
 FACTOR_FILE="$BASE_DIR/current_factor"
+INBOUND_FILTER_FILE="$BASE_DIR/inbound_filter"
+INBOUND_HISTORY_FILE="$BASE_DIR/inbound_history"
+APPLIED_INBOUND_FILTER_FILE="$BASE_DIR/applied_inbound_filter"
 
 mkdir -p "$BASE_DIR" "$BACKUP_DIR" "$BASE_BACKUP_DIR"
+
+if [ -f "$INBOUND_FILTER_FILE" ]; then
+    INBOUND_DATA="$(cat "$INBOUND_FILTER_FILE" 2>/dev/null || true)"
+    INBOUND_FILTER="${INBOUND_DATA%%:*}"
+    INBOUND_TAG="${INBOUND_DATA##*:}"
+fi
 
 LAST_BACKUP_DIR=""
 VERSION=""
@@ -52,6 +61,8 @@ if [ -t 1 ]; then
     C_BLUE="\033[1;34m"
     C_WHITE="\033[1;97m"
     C_GRAY="\033[0;37m"
+    C_MAGENTA="\033[1;35m"
+    C_BOLD="\033[1m"
 else
     C_RESET=""
     C_GREEN=""
@@ -61,7 +72,13 @@ else
     C_BLUE=""
     C_WHITE=""
     C_GRAY=""
+    C_MAGENTA=""
+    C_BOLD=""
 fi
+
+# Mode: "" for all inbounds, or an inbound number/tag for selective application
+INBOUND_FILTER=""
+INBOUND_TAG=""
 
 # ============================================================
 # FUNCTIONS
@@ -95,6 +112,18 @@ save_factor() {
     echo "$1" > "$FACTOR_FILE"
 }
 
+get_applied_inbound_filter() {
+    if [ -f "$APPLIED_INBOUND_FILTER_FILE" ]; then
+        cat "$APPLIED_INBOUND_FILTER_FILE"
+    else
+        echo ""
+    fi
+}
+
+save_applied_inbound_filter() {
+    echo "$INBOUND_FILTER" > "$APPLIED_INBOUND_FILTER_FILE"
+}
+
 show_header() {
     clear
     echo
@@ -121,6 +150,180 @@ fi
 
 check_panel() {
     [ -x "$BIN" ] || return 1
+}
+
+# ============================================================
+# SELECT INBOUND FOR TRAFFIC FACTOR
+# ============================================================
+# در صورت تمایل، کاربر می‌تواند ضریب را فقط بر روی یک اینباند
+# مشخص اعمال کند. این تابع برای انتخاب / غیرفعال‌سازی فیلتر است.
+
+# ============================================================
+# LIST INBOUNDS FROM DATABASE
+# ============================================================
+
+list_inbounds() {
+
+    local DB
+    local QUERY
+    local RESULT
+
+    DB="$(find_database || true)"
+
+    if [ -z "$DB" ] || [ ! -f "$DB" ]; then
+        echo -e "${C_RED}  ✗ دیتابیس پیدا نشد.${C_RESET}"
+        return 1
+    fi
+
+    QUERY="SELECT id, tag, port, protocol FROM inbounds WHERE enable = 1 ORDER BY id;"
+    RESULT="$(sqlite3 "$DB" "$QUERY" 2>/dev/null || true)"
+
+    if [ -z "$RESULT" ]; then
+        echo -e "${C_RED}  ✗ هیچ اینباند فعالی پیدا نشد.${C_RESET}"
+        return 1
+    fi
+
+    echo "$RESULT"
+}
+
+# ============================================================
+# SELECT INBOUND FOR TRAFFIC FACTOR (integrated into factor_menu)
+# ============================================================
+
+select_inbound_if_needed() {
+
+    echo
+    echo -e "  ${C_CYAN}تنظیم اینباند${C_RESET}"
+    echo
+
+    if [ -n "$INBOUND_FILTER" ]; then
+        echo -e "  ${C_YELLOW}اینباندهای انتخاب‌شده فعلی:${C_RESET} ${C_MAGENTA}$INBOUND_TAG${C_RESET}"
+        echo
+    fi
+
+    echo -e "  ${C_YELLOW}ضریب برای کدام اینباندها؟${C_RESET}"
+    echo -e "  ${C_GREEN}[1]${C_RESET}  تمام اینباندها"
+
+    if [ -n "$INBOUND_FILTER" ]; then
+        echo -e "  ${C_GREEN}[2]${C_RESET}  اضافه کردن اینباند جدید به انتخاب فعلی"
+        echo -e "  ${C_GREEN}[3]${C_RESET}  شروع از نو (جایگزینی کامل انتخاب فعلی)"
+    else
+        echo -e "  ${C_GREEN}[2]${C_RESET}  اینباندهای مشخص"
+    fi
+
+    echo
+
+    read -r -p "  انتخاب: " MODE_CHOICE
+
+    case "$MODE_CHOICE" in
+
+        1)
+            rm -f "$INBOUND_FILTER_FILE" "$APPLIED_INBOUND_FILTER_FILE"
+            INBOUND_FILTER=""
+            INBOUND_TAG=""
+            echo -e "${C_GREEN}  ✓ ضریب بر روی تمام اینباندها اعمال می‌شود.${C_RESET}"
+            ;;
+
+        2)
+            if [ -n "$INBOUND_FILTER" ]; then
+                # اضافه کردن اینباندهای جدید به انتخاب فعلی
+                _select_new_inbounds "اضافه"
+            else
+                # اولین بار: انتخاب اینباندهای مشخص
+                _select_new_inbounds "جایگزین"
+            fi
+            ;;
+
+        3)
+            if [ -n "$INBOUND_FILTER" ]; then
+                # جایگزین کردن کامل انتخاب فعلی
+                _select_new_inbounds "جایگزین"
+            else
+                echo -e "${C_RED}  ✗ گزینه نامعتبر.${C_RESET}"
+                return 1
+            fi
+            ;;
+
+        *)
+            echo -e "${C_RED}  ✗ گزینه نامعتبر.${C_RESET}"
+            return 1
+            ;;
+    esac
+}
+
+# تابع کمکی برای انتخاب اینباندهای جدید
+_select_new_inbounds() {
+
+    local ACTION="$1"  # "جایگزین" یا "اضافه"
+
+    echo
+    echo -e "  ${C_CYAN}اینباندهای فعال:${C_RESET}"
+    echo
+
+    local INBOUNDS
+    local COUNTER
+
+    INBOUNDS="$(list_inbounds)" || return 1
+
+    COUNTER=0
+    while IFS='|' read -r ID TAG PORT PROTOCOL; do
+        COUNTER=$((COUNTER + 1))
+        echo -e "  ${C_GREEN}[$COUNTER]${C_RESET}  Tag: ${C_BOLD}$TAG${C_RESET} | Port: ${C_YELLOW}$PORT${C_RESET} | Protocol: $PROTOCOL"
+    done <<< "$INBOUNDS"
+
+    echo
+
+    if [ "$ACTION" = "اضافه" ]; then
+        read -r -p "  اینباندهای جدید را وارد کنید (با کاما: 1,2,3): " CHOICE_INPUT
+    else
+        read -r -p "  اینباندها را انتخاب کنید (با کاما: 1,2,3): " CHOICE_INPUT
+    fi
+
+    if [ -z "$CHOICE_INPUT" ]; then
+        echo -e "${C_RED}  ✗ انتخاب نامعتبر.${C_RESET}"
+        return 1
+    fi
+
+    local SELECTED_IDS=""
+    local SELECTED_TAGS=""
+    local IFS_BACKUP="$IFS"
+    IFS=','
+
+    for CHOICE_NUM in $CHOICE_INPUT; do
+        CHOICE_NUM="${CHOICE_NUM// /}"
+
+        if ! [[ "$CHOICE_NUM" =~ ^[0-9]+$ ]] || [ "$CHOICE_NUM" -lt 1 ] || [ "$CHOICE_NUM" -gt "$COUNTER" ]; then
+            echo -e "${C_RED}  ✗ انتخاب نامعتبر: $CHOICE_NUM${C_RESET}"
+            return 1
+        fi
+
+        local SELECTED_ID="$(echo "$INBOUNDS" | sed -n "${CHOICE_NUM}p" | cut -d'|' -f1)"
+        local SELECTED_TAG="$(echo "$INBOUNDS" | sed -n "${CHOICE_NUM}p" | cut -d'|' -f2)"
+
+        if [ -n "$SELECTED_IDS" ]; then
+            SELECTED_IDS="$SELECTED_IDS,$SELECTED_ID"
+            SELECTED_TAGS="$SELECTED_TAGS, $SELECTED_TAG"
+        else
+            SELECTED_IDS="$SELECTED_ID"
+            SELECTED_TAGS="$SELECTED_TAG"
+        fi
+    done
+
+    IFS="$IFS_BACKUP"
+
+    # اگر اضافه کردن است، قدیمی‌ها رو هم اضافه کن
+    if [ "$ACTION" = "اضافه" ]; then
+        SELECTED_IDS="$INBOUND_FILTER,$SELECTED_IDS"
+        SELECTED_TAGS="$INBOUND_TAG, $SELECTED_TAGS"
+        echo -e "${C_GREEN}  ✓ اینباندهای جدید اضافه شدند.${C_RESET}"
+    else
+        echo -e "${C_GREEN}  ✓ اینباندها جایگزین شدند.${C_RESET}"
+    fi
+
+    INBOUND_FILTER="$SELECTED_IDS"
+    INBOUND_TAG="$SELECTED_TAGS"
+    echo "$SELECTED_IDS:$SELECTED_TAGS" > "$INBOUND_FILTER_FILE"
+    echo -e "${C_GREEN}  ✓ ضریب برای اینباندهای ${C_BOLD}$SELECTED_TAGS${C_RESET}${C_GREEN} اعمال می‌شود.${C_RESET}"
 }
 
 # ============================================================
@@ -204,13 +407,129 @@ install_gcc() {
     fi
 }
 
+# آینه‌های شناخته‌شده که فایل‌هایشان دقیقاً هم‌ساختار go.dev/dl هستند
+# (همان اسم فایل، مسیر یکسان). اگر یکی (مثلاً go.dev/dl.google.com)
+# از سمت سرور فیلتر باشد، بقیه امتحان می‌شوند.
+GO_MIRRORS=(
+    "https://go.dev/dl"
+    "https://golang.google.cn/dl"
+    "https://mirrors.aliyun.com/golang"
+    "https://mirrors.ustc.edu.cn/golang"
+)
+
+go_download_from_url() {
+    local URL="$1"
+    local OUT_FILE="$2"
+    local ERR_LOG="/tmp/FARID-go-download.log"
+    local HTTP_CODE=""
+
+    rm -f "$OUT_FILE" "$ERR_LOG"
+
+    if command -v curl >/dev/null 2>&1; then
+
+        HTTP_CODE="$(
+            curl -sL --retry 2 --connect-timeout 10 --max-time 180 \
+                -w '%{http_code}' \
+                -o "$OUT_FILE" \
+                "$URL" 2>"$ERR_LOG"
+        )"
+
+        if [ "$HTTP_CODE" != "200" ] || [ ! -s "$OUT_FILE" ]; then
+            echo -e "${C_YELLOW}    آدرس: $URL${C_RESET}"
+            echo -e "${C_YELLOW}    کد HTTP: ${HTTP_CODE:-نامشخص}${C_RESET}"
+            [ -s "$ERR_LOG" ] && sed 's/^/    /' "$ERR_LOG"
+            return 1
+        fi
+
+        return 0
+
+    elif command -v wget >/dev/null 2>&1; then
+
+        if ! wget -T 15 -t 2 -O "$OUT_FILE" "$URL" 2>"$ERR_LOG" || [ ! -s "$OUT_FILE" ]; then
+            echo -e "${C_YELLOW}    آدرس: $URL${C_RESET}"
+            [ -s "$ERR_LOG" ] && tail -n 5 "$ERR_LOG" | sed 's/^/    /'
+            return 1
+        fi
+
+        return 0
+
+    else
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl
+            go_download_from_url "$URL" "$OUT_FILE"
+            return $?
+        else
+            error_exit "curl یا wget پیدا نشد."
+        fi
+    fi
+}
+
+# یک نسخه‌ی مشخص از Go را از تمام آینه‌های شناخته‌شده، یکی‌یکی و
+# خودکار، امتحان می‌کند تا یکی جواب بدهد. کاربر کاری نباید بکند.
+go_download_tarball() {
+    local VER="$1"
+    local ARCH="$2"
+    local OUT_FILE="$3"
+
+    local FILE="go${VER}.linux-${ARCH}.tar.gz"
+    local BASE
+
+    for BASE in "${GO_MIRRORS[@]}"; do
+
+        if go_download_from_url "${BASE}/${FILE}" "$OUT_FILE" && gzip -t "$OUT_FILE" 2>/dev/null; then
+            return 0
+        fi
+
+        rm -f "$OUT_FILE"
+    done
+
+    return 1
+}
+
+# اگر هیچ‌کدام از آینه‌ها جواب ندادند، آخرین راه: نصب Go از طریق
+# پکیج‌منیجر خود سیستم. فقط در صورتی پذیرفته می‌شود که نسخه‌اش
+# حداقل به‌اندازه‌ی نسخه‌ی درخواستی go.mod باشد؛ وگرنه Build با
+# خطای ناسازگاری نسخه شکست می‌خورد.
+install_go_via_package_manager() {
+    local REQUIRED="$1"
+
+    echo
+    echo -e "${C_YELLOW}  در حال تلاش برای نصب Go از طریق پکیج‌منیجر سیستم...${C_RESET}"
+
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq golang-go
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y golang
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y golang
+    else
+        return 1
+    fi
+
+    command -v go >/dev/null 2>&1 || return 1
+
+    local INSTALLED
+    INSTALLED="$(command go version 2>/dev/null | sed -nE 's/.*go([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p')"
+
+    [ -n "$INSTALLED" ] || return 1
+
+    if [ "$(printf '%s\n' "$REQUIRED" "$INSTALLED" | sort -V | head -n1)" != "$REQUIRED" ]; then
+        echo -e "${C_YELLOW}  نسخه‌ی Go در مخزن پکیج‌منیجر ($INSTALLED) قدیمی‌تر از نسخه‌ی لازم ($REQUIRED) است؛ قابل استفاده نیست.${C_RESET}"
+        return 1
+    fi
+
+    return 0
+}
+
 install_go() {
     local REQUIRED="$1"
     local ARCH
     local GO_ARCH
-    local FILE
-    local URL
     local TMP
+    local RESOLVED="$REQUIRED"
+    local DOWNLOAD_OK=0
 
     ARCH="$(uname -m)"
 
@@ -221,25 +540,85 @@ install_go() {
         *) error_exit "معماری $ARCH پشتیبانی نمی‌شود." ;;
     esac
 
-    FILE="go${REQUIRED}.linux-${GO_ARCH}.tar.gz"
-    URL="https://go.dev/dl/${FILE}"
-    TMP="/tmp/${FILE}"
+    TMP="/tmp/go${RESOLVED}.linux-${GO_ARCH}.tar.gz"
 
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 3 --connect-timeout 15 "$URL" -o "$TMP"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O "$TMP" "$URL"
+    # --------------------------------------------------------
+    # تلاش اول: همون نسخه‌ای که go.mod خواسته
+    # --------------------------------------------------------
+
+    if go_download_tarball "$RESOLVED" "$GO_ARCH" "$TMP" && gzip -t "$TMP" 2>/dev/null; then
+        DOWNLOAD_OK=1
     else
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl
-            curl -fL --retry 3 --connect-timeout 15 "$URL" -o "$TMP"
-        else
-            error_exit "curl یا wget پیدا نشد."
+        rm -f "$TMP"
+    fi
+
+    # --------------------------------------------------------
+    # تلاش دوم: جدیدترین نسخه‌ی پایدار Go
+    # (چون خط "go" در go.mod حداقل نسخه‌ی لازم رو مشخص می‌کنه،
+    # نه نسخه‌ی دقیق، نسخه‌ی جدیدتر همیشه باید کار کنه.)
+    # --------------------------------------------------------
+
+    if [ "$DOWNLOAD_OK" -eq 0 ]; then
+
+        echo
+        echo -e "${C_YELLOW}⚠ دانلود go${RESOLVED} ناموفق بود. در حال دریافت جدیدترین نسخه‌ی پایدار Go...${C_RESET}"
+
+        local LATEST=""
+
+        if command -v curl >/dev/null 2>&1; then
+            LATEST="$(curl -fsSL --connect-timeout 10 --max-time 20 "https://go.dev/VERSION?m=text" 2>/dev/null | head -n1)"
+            [ -n "$LATEST" ] ||
+                LATEST="$(curl -fsSL --connect-timeout 10 --max-time 20 "https://golang.google.cn/VERSION?m=text" 2>/dev/null | head -n1)"
+        elif command -v wget >/dev/null 2>&1; then
+            LATEST="$(wget -T 10 -qO- "https://go.dev/VERSION?m=text" 2>/dev/null | head -n1)"
+            [ -n "$LATEST" ] ||
+                LATEST="$(wget -T 10 -qO- "https://golang.google.cn/VERSION?m=text" 2>/dev/null | head -n1)"
+        fi
+
+        LATEST="${LATEST#go}"
+
+        if [ -n "$LATEST" ] && [ "$LATEST" != "$RESOLVED" ]; then
+
+            RESOLVED="$LATEST"
+            TMP="/tmp/go${RESOLVED}.linux-${GO_ARCH}.tar.gz"
+
+            echo -e "${C_CYAN}  در حال دانلود go${RESOLVED}...${C_RESET}"
+
+            if go_download_tarball "$RESOLVED" "$GO_ARCH" "$TMP" && gzip -t "$TMP" 2>/dev/null; then
+                DOWNLOAD_OK=1
+            else
+                rm -f "$TMP"
+            fi
         fi
     fi
 
-    [ -s "$TMP" ] || error_exit "دانلود Go ناموفق بود."
+    # --------------------------------------------------------
+    # اگر دانلود مستقیم از go.dev به هر دلیلی (مثلاً فیلتر بودن
+    # go.dev / dl.google.com روی این سرور) ممکن نبود، آخرین
+    # تلاش: نصب Go از طریق پکیج‌منیجر سیستم.
+    # --------------------------------------------------------
+
+    if [ "$DOWNLOAD_OK" -eq 0 ]; then
+
+        if install_go_via_package_manager "$REQUIRED"; then
+
+            GO="$(command -v go)"
+
+            export PATH="/usr/local/go/bin:$PATH"
+
+            echo
+            echo -e "${C_GREEN}✓ Go از طریق پکیج‌منیجر سیستم نصب شد.${C_RESET}"
+
+            return 0
+
+        else
+            echo
+            echo -e "${C_RED}✗ دانلود Go از هیچ‌کدام از آینه‌ها (go.dev، golang.google.cn، aliyun، ustc) ممکن نشد و نصب از پکیج‌منیجر هم نسخه‌ی کافی نداد.${C_RESET}"
+            echo -e "${C_YELLOW}  این یعنی دسترسی این سرور به همه‌ی این منابع مسدود/قطع است.${C_RESET}"
+            echo -e "${C_YELLOW}  DNS و اتصال اینترنت سرور را بررسی کنید (مثلاً: curl -I https://mirrors.aliyun.com).${C_RESET}"
+            exit 1
+        fi
+    fi
 
     rm -rf /usr/local/go
     tar -C /usr/local -xzf "$TMP"
@@ -279,11 +658,22 @@ check_go() {
 
     if [ -z "$INSTALLED_GO" ]; then
         install_go "$REQUIRED_GO"
-        GO="/usr/local/go/bin/go"
     elif [ "$(printf '%s\n' "$REQUIRED_GO" "$INSTALLED_GO" | sort -V | head -n1)" != "$REQUIRED_GO" ]; then
         install_go "$REQUIRED_GO"
-        GO="/usr/local/go/bin/go"
     fi
+
+    # install_go ممکن است Go را از طریق tarball (در /usr/local/go)
+    # یا از طریق پکیج‌منیجر سیستم (مسیر دیگری) نصب کرده باشد؛
+    # مسیر واقعی go را دوباره تشخیص می‌دهیم، نه اینکه مسیر tarball
+    # را فرض کنیم.
+    if [ -x /usr/local/go/bin/go ]; then
+        GO="/usr/local/go/bin/go"
+    elif command -v go >/dev/null 2>&1; then
+        GO="$(command -v go)"
+    fi
+
+    [ -n "$GO" ] && [ -x "$GO" ] ||
+        error_exit "باینری go بعد از نصب پیدا نشد."
 
     export PATH="/usr/local/go/bin:$PATH"
 }
@@ -307,6 +697,18 @@ check_source() {
         "$REPO" \
         "$SRC_DIR" \
         || error_exit "دریافت سورس ناموفق بود."
+
+    # این اسکریپت فقط تا نسخه‌ی v2.9.4 پشتیبانی می‌شود
+    # (ساختار: web/service/inbound.go)
+    # از v3.0.0 به بعد ساختار کد کاملاً تغییر کرده و پشتیبانی نمی‌شود.
+
+    if [ -f "$SRC_DIR/web/service/inbound.go" ]; then
+        SRC="$SRC_DIR/web/service/inbound.go"
+    elif [ -f "$SRC_DIR/internal/web/service/inbound.go" ]; then
+        error_exit "نسخه‌ی $VERSION پشتیبانی نمی‌شود (ساختار کد از v3.0.0 به بعد تغییر کرده). لطفاً از نسخه‌ی v2.9.4 یا قدیمی‌تر استفاده کنید."
+    else
+        error_exit "inbound.go پیدا نشد."
+    fi
 
     [ -f "$SRC" ]
 }
@@ -342,6 +744,12 @@ find_database() {
 # ============================================================
 
 restore_source_from_base() {
+
+    if [ ! -f "$BASE_BACKUP_DIR/inbound.go" ]; then
+        echo
+        echo -e "${C_YELLOW}⚠ نسخه پایه پیدا نشد. در حال ساخت دوباره‌ی نسخه پایه...${C_RESET}"
+        create_base_backup
+    fi
 
     [ -f "$BASE_BACKUP_DIR/inbound.go" ] ||
         error_exit "نسخه پایه inbound.go پیدا نشد."
@@ -508,12 +916,14 @@ apply_factor() {
     # اعمال ضریب
     # --------------------------------------------------------
 
-    python3 - "$SRC" "$NUM" <<'PY'
+    python3 - "$SRC" "$NUM" "$INBOUND_FILTER" "$INBOUND_TAG" <<'PY'
 import sys
 from pathlib import Path
 
 p = Path(sys.argv[1])
 factor = int(sys.argv[2])
+inbound_filter = sys.argv[3] if len(sys.argv) > 3 else ""
+inbound_tag = sys.argv[4] if len(sys.argv) > 4 else ""
 
 START = "/* QFARID_T2F_START */"
 END   = "/* QFARID_T2F_END */"
@@ -618,25 +1028,54 @@ TOTAL = "(traffics[traffic_index].Up + traffics[traffic_index].Down)"
 # ضریب 1 = حالت اصلی
 # ------------------------------------------------------------
 
+# Build condition for multiple inbound IDs (e.g., "7,17,19" → "InboundId == 7 || InboundId == 17 || InboundId == 19")
+if inbound_filter:
+    ids = [id.strip() for id in inbound_filter.split(',')]
+    condition = " || ".join([f"dbClientTraffics[dbTraffic_index].InboundId == {id}" for id in ids])
+else:
+    condition = ""
+
 if factor == 1:
 
-    new = [
-        f"{indent}{START}\n",
-        f"{indent}dbClientTraffics[dbTraffic_index].Up += {UP}\n",
-        f"{indent}dbClientTraffics[dbTraffic_index].Down += {DOWN}\n",
-        f"{indent}dbClientTraffics[dbTraffic_index].AllTime += {TOTAL}\n",
-        f"{indent}{END}\n",
-    ]
+    if condition:
+        new = [
+            f"{indent}{START}\n",
+            f"{indent}if {condition} {{\n",
+            f"{indent}    dbClientTraffics[dbTraffic_index].Up += {UP}\n",
+            f"{indent}    dbClientTraffics[dbTraffic_index].Down += {DOWN}\n",
+            f"{indent}    dbClientTraffics[dbTraffic_index].AllTime += {TOTAL}\n",
+            f"{indent}}}\n",
+            f"{indent}{END}\n",
+        ]
+    else:
+        new = [
+            f"{indent}{START}\n",
+            f"{indent}dbClientTraffics[dbTraffic_index].Up += {UP}\n",
+            f"{indent}dbClientTraffics[dbTraffic_index].Down += {DOWN}\n",
+            f"{indent}dbClientTraffics[dbTraffic_index].AllTime += {TOTAL}\n",
+            f"{indent}{END}\n",
+        ]
 
 else:
 
-    new = [
-        f"{indent}{START}\n",
-        f"{indent}dbClientTraffics[dbTraffic_index].Up += {UP} * {factor}\n",
-        f"{indent}dbClientTraffics[dbTraffic_index].Down += {DOWN} * {factor}\n",
-        f"{indent}dbClientTraffics[dbTraffic_index].AllTime += {TOTAL} * {factor}\n",
-        f"{indent}{END}\n",
-    ]
+    if condition:
+        new = [
+            f"{indent}{START}\n",
+            f"{indent}if {condition} {{\n",
+            f"{indent}    dbClientTraffics[dbTraffic_index].Up += {UP} * {factor}\n",
+            f"{indent}    dbClientTraffics[dbTraffic_index].Down += {DOWN} * {factor}\n",
+            f"{indent}    dbClientTraffics[dbTraffic_index].AllTime += {TOTAL} * {factor}\n",
+            f"{indent}}}\n",
+            f"{indent}{END}\n",
+        ]
+    else:
+        new = [
+            f"{indent}{START}\n",
+            f"{indent}dbClientTraffics[dbTraffic_index].Up += {UP} * {factor}\n",
+            f"{indent}dbClientTraffics[dbTraffic_index].Down += {DOWN} * {factor}\n",
+            f"{indent}dbClientTraffics[dbTraffic_index].AllTime += {TOTAL} * {factor}\n",
+            f"{indent}{END}\n",
+        ]
 
 lines = (
     lines[:email_index + 1]
@@ -647,7 +1086,13 @@ lines = (
 
 p.write_text("".join(lines))
 
-print(f"✓ ضریب {factor} روی فقط ترافیک جدید اعمال شد.")
+if inbound_filter:
+    if inbound_tag:
+        print(f"✓ ضریب {factor} فقط روی اینباند {inbound_tag} (ID: {inbound_filter}) اعمال شد.")
+    else:
+        print(f"✓ ضریب {factor} فقط روی اینباند ID {inbound_filter} اعمال شد.")
+else:
+    print(f"✓ ضریب {factor} روی تمام اینباندها اعمال شد.")
 PY
 
     # --------------------------------------------------------
@@ -930,6 +1375,10 @@ restore_backup() {
             cp -a "$BASE_BACKUP_DIR/x-ui" "$BIN"
             cp -a "$BASE_BACKUP_DIR/inbound.go" "$SRC"
 
+            rm -f "$INBOUND_FILTER_FILE" "$APPLIED_INBOUND_FILTER_FILE"
+            INBOUND_FILTER=""
+            INBOUND_TAG=""
+
             save_factor "1"
 
             systemctl daemon-reload
@@ -968,6 +1417,10 @@ restore_backup() {
 
 factor_menu() {
 
+    select_inbound_if_needed || return
+
+    pause
+
     while true; do
 
         show_header
@@ -975,6 +1428,13 @@ factor_menu() {
         CURRENT="$(get_current_factor)"
 
         echo -e "  ضریب فعلی: ${C_YELLOW}${C_WHITE}$CURRENT${C_RESET}"
+        if [ -n "$INBOUND_FILTER" ]; then
+            if [ -n "$INBOUND_TAG" ]; then
+                echo -e "  اینباند: ${C_MAGENTA}$INBOUND_TAG${C_RESET} (ID: $INBOUND_FILTER)"
+            else
+                echo -e "  اینباند: ${C_MAGENTA}ID: $INBOUND_FILTER${C_RESET}"
+            fi
+        fi
         echo
 
         line
@@ -1021,10 +1481,10 @@ factor_menu() {
                 ;;
         esac
 
-        if [ "$NEW_FACTOR" = "$CURRENT" ]; then
+        if [ "$NEW_FACTOR" = "$CURRENT" ] && [ "$INBOUND_FILTER" = "$(get_applied_inbound_filter)" ]; then
 
             echo
-            echo "  این ضریب در حال حاضر فعال است."
+            echo "  همین ضریب با همین اینباندها از قبل روی پنل فعال و Build شده است."
 
             pause
 
@@ -1049,6 +1509,7 @@ factor_menu() {
                     if build_panel; then
 
                         save_factor "$NEW_FACTOR"
+                        save_applied_inbound_filter
 
                         echo
                         line
@@ -1134,6 +1595,16 @@ show_status() {
 
     echo -e "  ضریب فعلی  : ${C_YELLOW}$(get_current_factor)${C_RESET}"
 
+    if [ -n "$INBOUND_FILTER" ]; then
+        if [ -n "$INBOUND_TAG" ]; then
+            echo -e "  اینباند    : ${C_MAGENTA}$INBOUND_TAG${C_RESET} (ID: $INBOUND_FILTER)"
+        else
+            echo -e "  اینباند    : ${C_MAGENTA}ID: $INBOUND_FILTER${C_RESET}"
+        fi
+    else
+        echo -e "  اینباند    : ${C_GREEN}تمام اینباندها${C_RESET}"
+    fi
+
     echo
 
     line
@@ -1165,13 +1636,13 @@ main_menu() {
 
         echo
 
-        echo -e "  ${C_GREEN}[1]${C_RESET}  انتخاب / تغییر ضریب"
-        echo -e "  ${C_BLUE}[2]${C_RESET}  حذف ضریب و بازگشت به حالت اولیه"
-        echo -e "  ${C_CYAN}[3]${C_RESET}  بررسی وضعیت پنل"
+        echo -e "  ${C_GREEN}[1]${C_RESET}  📊 انتخاب / تغییر ضریب"
+        echo -e "  ${C_BLUE}[2]${C_RESET}  ↻  حذف ضریب و بازگشت به حالت اولیه"
+        echo -e "  ${C_CYAN}[3]${C_RESET}  📋  بررسی وضعیت پنل"
 
         echo
 
-        echo -e "  ${C_GRAY}[0]${C_RESET}  خروج"
+        echo -e "  ${C_GRAY}[0]${C_RESET}  🚪 خروج"
 
         echo
 
