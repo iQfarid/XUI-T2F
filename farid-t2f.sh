@@ -168,6 +168,8 @@ list_inbounds() {
     local QUERY
     local RESULT
 
+    install_sqlite3
+
     DB="$(find_database || true)"
 
     if [ -z "$DB" ] || [ ! -f "$DB" ]; then
@@ -387,6 +389,21 @@ install_git() {
         dnf install -y git
     elif command -v yum >/dev/null 2>&1; then
         yum install -y git
+    else
+        error_exit "package manager پیدا نشد."
+    fi
+}
+
+install_sqlite3() {
+    command -v sqlite3 >/dev/null 2>&1 && return
+
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y sqlite
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y sqlite
     else
         error_exit "package manager پیدا نشد."
     fi
